@@ -1,0 +1,2335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grind Time</title>
+
+  <!--
+  ╔═══════════════════════════════════════════════════════════╗
+  ║  Grind Time — HSC Software Engineering Major Project      ║
+  ║  Helps parents track and understand their children's      ║
+  ║  video game time, with a built-in trend predictor.        ║
+  ╠═══════════════════════════════════════════════════════════╣
+  ║  FEATURES                                                  ║
+  ║    • Full CRUD on games and logged sessions                ║
+  ║    • Registration / login / logout with session persistence║
+  ║    • Passwords hashed client-side with SHA-256 + salt      ║
+  ║      via the Web Crypto API (see PasswordHasher)           ║
+  ║    • Two roles: standard user and admin, with different    ║
+  ║      access (see AuthService.requireAdmin / the Admin page)║
+  ║    • A self-contained ML feature (PlaytimePredictionModel) ║
+  ║      that predicts each game's future daily playtime and   ║
+  ║      flags rising/falling trends                           ║
+  ║    • Graceful, user-facing error handling for bad input,   ║
+  ║      restricted pages, and storage failures                ║
+  ║                                                             ║
+  ║  ARCHITECTURE (see class diagram for the full picture)     ║
+  ║    Database → Repository → UserRepository/GameRepository/  ║
+  ║    GameLogRepository → AuthService / App                   ║
+  ║    Models: User, Game, GameLog                             ║
+  ║    PasswordHasher, PlaytimePredictionModel are standalone   ║
+  ║    service classes.                                        ║
+  ║                                                             ║
+  ║  DATA STORE: localStorage, wrapped by the Database class.  ║
+  ║  This keeps the whole app a single file with no server,    ║
+  ║  while still going through one disciplined access point    ║
+  ║  that can later be swapped for real fetch() calls to a     ║
+  ║  Flask/Express + SQL backend without touching the rest of  ║
+  ║  the app (see Repository — only its _readAll/_writeAll     ║
+  ║  would need to change).                                    ║
+  ║                                                             ║
+  ║  Demo accounts:                                             ║
+  ║    Admin:    demo@grindtime.com   / Demo1234!               ║
+  ║    Standard: child@grindtime.com  / Demo1234!                ║
+  ╚═══════════════════════════════════════════════════════════╝
+  -->
+
+  <style>
+    :root {
+      --navy:       #2d1b69;
+      --navy-dark:  #1e1248;
+      --green:      #2e7d52;
+      --green-pale: #e8f5ee;
+      --red:        #c0392b;
+      --red-pale:   #fdecea;
+      --amber:      #e8960a;
+      --amber-pale: #fef8e7;
+      --blue:       #1e40af;
+      --blue-pale:  #dbeafe;
+      --purple:     #6d28d9;
+      --purple-pale:#ede9fe;
+      --border:     #d4dce0;
+      --bg:         #f2f4f5;
+      --white:      #ffffff;
+      --text:       #1e2b30;
+      --text-soft:  #5c6e75;
+      --radius:     5px;
+      --radius-lg:  10px;
+      --shadow:     0 1px 6px rgba(0,0,0,0.07);
+      --shadow-lg:  0 8px 32px rgba(0,0,0,0.18);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+    }
+
+    .page     { display: none; }
+    .page.active { display: block; }
+
+    /* ─── AUTH PAGES ─────────────────────────────────── */
+    .auth-outer {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .auth-card {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 32px 36px;
+      width: 100%;
+      max-width: 420px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.09);
+    }
+
+    .auth-logo {
+      font-size: 22px;
+      font-weight: bold;
+      color: var(--navy);
+      margin-bottom: 4px;
+    }
+
+    .auth-tagline {
+      color: var(--text-soft);
+      font-size: 13px;
+      margin-bottom: 24px;
+    }
+
+    /* ─── APP SHELL (CSS Grid) ───────────────────────── */
+    .app-shell {
+      display: grid;
+      grid-template-columns: 200px 1fr;
+      grid-template-rows: 50px 1fr;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      grid-column: 1 / -1;
+      position: sticky;
+      top: 0;
+      height: 50px;
+      background: var(--navy);
+      display: flex;
+      align-items: center;
+      padding: 0 18px;
+      gap: 12px;
+      z-index: 100;
+    }
+
+    .topbar-title { font-size: 17px; font-weight: bold; color: white; }
+    .topbar-spacer { flex: 1; }
+    .topbar-user {
+      font-size: 13px;
+      color: rgba(255,255,255,0.8);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .role-pill {
+      font-size: 10px;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 2px 8px;
+      border-radius: 20px;
+      background: rgba(255,255,255,0.15);
+      color: white;
+    }
+    .role-pill.admin { background: var(--amber); color: #4a2f00; }
+
+    .sidebar {
+      grid-row: 2;
+      background: var(--navy-dark);
+      padding: 14px 8px;
+      overflow-y: auto;
+    }
+
+    .nav-section-label {
+      font-size: 10px;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.9px;
+      color: rgba(255,255,255,0.3);
+      padding: 0 8px;
+      margin: 14px 0 6px;
+    }
+    .nav-section-label:first-child { margin-top: 0; }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      padding: 9px 10px;
+      background: none;
+      border: none;
+      border-radius: var(--radius);
+      color: rgba(255,255,255,0.65);
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.12s, color 0.12s;
+    }
+    .nav-link:hover  { background: rgba(255,255,255,0.08); color: white; }
+    .nav-link.active { background: rgba(255,255,255,0.13); color: white; font-weight: bold; }
+    .nav-link[hidden] { display: none; }
+
+    .main { grid-row: 2; padding: 26px 28px; min-width: 0; }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .section-title { font-size: 20px; font-weight: bold; color: var(--navy); }
+    .section-sub { font-size: 13px; color: var(--text-soft); margin-top: 2px; }
+
+    .card {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+    }
+    .card-head {
+      padding: 13px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .card-title { font-weight: bold; color: var(--navy); font-size: 14px; }
+    .card-sub { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
+    .card-body { padding: 18px; }
+
+    .stats-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+    @media (max-width: 720px) { .stats-row { grid-template-columns: repeat(2, 1fr); } }
+
+    .stat-card {
+      background: var(--white);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--navy);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+    .stat-value { font-size: 26px; font-weight: bold; color: var(--navy); }
+    .stat-label { font-size: 12px; color: var(--text-soft); margin-top: 2px; }
+
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 520px) { .form-row { grid-template-columns: 1fr; } }
+    .form-group { margin-bottom: 13px; }
+    .form-label { display: block; font-size: 13px; font-weight: bold; color: var(--text); margin-bottom: 5px; }
+    .req { color: var(--red); }
+
+    .form-control {
+      width: 100%;
+      padding: 8px 11px;
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-family: inherit;
+      color: var(--text);
+      background: var(--white);
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .form-control:focus { border-color: var(--navy); box-shadow: 0 0 0 2px rgba(26,58,92,0.12); }
+    .form-control.is-error { border-color: var(--red); }
+    textarea.form-control { resize: vertical; min-height: 72px; }
+    .form-hint { font-size: 12px; color: var(--text-soft); margin-top: 3px; }
+
+    .field-err { font-size: 12px; color: var(--red); margin-top: 3px; display: none; }
+    .msg-error {
+      background: var(--red-pale); border: 1px solid rgba(192,57,43,0.2); border-radius: var(--radius);
+      color: var(--red); padding: 9px 12px; font-size: 13px; margin-bottom: 12px; display: none;
+    }
+    .msg-success {
+      background: var(--green-pale); border: 1px solid rgba(46,125,82,0.2); border-radius: var(--radius);
+      color: var(--green); padding: 9px 12px; font-size: 13px; margin-bottom: 12px; display: none;
+    }
+
+    /* ─── Buttons ─────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 16px; border: 1.5px solid transparent; border-radius: var(--radius);
+      font-size: 13px; font-family: inherit; font-weight: bold; cursor: pointer;
+      transition: opacity 0.12s; line-height: 1;
+    }
+    .btn:hover  { opacity: 0.85; }
+    .btn:active { opacity: 0.7;  }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary { background: var(--navy);  color: white; }
+    .btn-green   { background: var(--green); color: white; }
+    .btn-red     { background: var(--red);   color: white; }
+    .btn-amber   { background: var(--amber); color: #4a2f00; }
+    .btn-outline { background: transparent; color: var(--navy); border-color: var(--navy); }
+    .btn-sm { padding: 5px 11px; font-size: 12px; }
+    .btn-block { width: 100%; justify-content: center; }
+
+    /* ─── Table ──────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead tr { background: var(--navy); }
+    thead th { padding: 10px 13px; text-align: left; color: white; font-size: 12px; font-weight: bold; white-space: nowrap; }
+    tbody tr { border-bottom: 1px solid #eee; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #f7f9fb; }
+    tbody td { padding: 10px 13px; vertical-align: middle; }
+
+    /* ─── Badges ─────────────────────────────────────── */
+    .badge {
+      display: inline-block; padding: 2px 9px; border-radius: 20px;
+      font-size: 12px; font-weight: bold; background: var(--blue-pale); color: var(--blue);
+    }
+    .badge-blue   { background: var(--blue-pale);   color: var(--blue); }
+    .badge-green  { background: var(--green-pale);  color: var(--green); }
+    .badge-amber  { background: var(--amber-pale);  color: #92400e; }
+    .badge-red    { background: var(--red-pale);    color: var(--red); }
+    .badge-purple { background: var(--purple-pale); color: var(--purple); }
+
+    .trend-up   { color: var(--red);   font-weight: bold; }
+    .trend-down { color: var(--green); font-weight: bold; }
+    .trend-flat { color: var(--text-soft); font-weight: bold; }
+
+    /* ─── Filter bar ─────────────────────────────────── */
+    .filter-bar { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
+    .filter-bar .form-control { margin-bottom: 0; }
+
+    /* ─── Info box ───────────────────────────────────── */
+    .info-box {
+      background: #1a2e3a; border-radius: var(--radius); padding: 12px 15px;
+      font-family: 'Courier New', monospace; font-size: 12px; color: #93c5a8; line-height: 1.8;
+    }
+    .info-box .c  { color: rgba(255,255,255,0.3); }
+    .info-box .k  { color: #7ec8e3; }
+    .info-box .v  { color: #f0c96e; }
+
+    .empty { text-align: center; padding: 36px 20px; color: var(--text-soft); }
+    .empty-icon { font-size: 34px; margin-bottom: 8px; }
+    .empty-text { font-size: 14px; }
+
+    .pw-bars { display: flex; gap: 3px; margin-top: 5px; }
+    .pw-bar  { height: 4px; flex: 1; border-radius: 2px; background: var(--border); transition: background 0.18s; }
+
+    *:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+    /* ─── Modal (used for confirm + edit) ───────────── */
+    .modal-backdrop {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+      z-index: 200; align-items: center; justify-content: center; padding: 20px;
+    }
+    .modal-backdrop.visible { display: flex; }
+    .modal-box {
+      background: var(--white); border-radius: var(--radius-lg); padding: 28px 32px;
+      max-width: 420px; width: 100%; box-shadow: var(--shadow-lg); max-height: 90vh; overflow-y: auto;
+    }
+    .modal-title { font-size: 16px; font-weight: bold; color: var(--navy); margin-bottom: 8px; }
+    .modal-msg { font-size: 13px; color: var(--text-soft); margin-bottom: 22px; line-height: 1.6; }
+    .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+
+    /* ─── Toasts ─────────────────────────────────────── */
+    .toast-wrap {
+      position: fixed; bottom: 20px; right: 20px; z-index: 300;
+      display: flex; flex-direction: column; gap: 8px; max-width: 320px;
+    }
+    .toast {
+      background: var(--navy-dark); color: white; padding: 11px 16px; border-radius: 8px;
+      font-size: 13px; box-shadow: var(--shadow-lg); animation: toastIn 0.2s ease-out;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .toast.error   { background: var(--red); }
+    .toast.success { background: var(--green); }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* ─── Predictions ────────────────────────────────── */
+    .predict-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+    .predict-card { background: var(--white); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow); }
+    .predict-card-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .predict-game-name { font-weight: bold; color: var(--navy); font-size: 14px; }
+    .predict-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-soft); padding: 3px 0; }
+    .predict-row strong { color: var(--text); }
+    .mini-bars { display: flex; align-items: flex-end; gap: 4px; height: 46px; margin: 10px 0; }
+    .mini-bar { flex: 1; background: var(--navy); border-radius: 3px 3px 0 0; min-height: 3px; }
+    .mini-bar.today { background: var(--amber); }
+
+    /* ─── Admin ──────────────────────────────────────── */
+    .admin-note { font-size: 12px; color: var(--text-soft); margin-top: -6px; margin-bottom: 14px; }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════
+  CONFIRM MODAL (reused for every "are you sure?" action)
+═══════════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="confirmModal">
+  <div class="modal-box">
+    <div class="modal-title" id="modalTitle">Are you sure?</div>
+    <div class="modal-msg"   id="modalMsg"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="app.modalResolve(false)">Cancel</button>
+      <button class="btn btn-red"     id="modalConfirmBtn" onclick="app.modalResolve(true)">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+  EDIT LOG MODAL
+═══════════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="editModal">
+  <div class="modal-box">
+    <div class="modal-title">✏ Edit Log</div>
+    <input type="hidden" id="editId">
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="eDate">Date <span class="req">*</span></label>
+        <input class="form-control" type="date" id="eDate">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="eGame">Game <span class="req">*</span></label>
+        <select class="form-control" id="eGame"><option value="">— select game —</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label" for="eHours">Hours <span class="req">*</span></label>
+        <input class="form-control" type="number" id="eHours" min="0" max="12">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="eMins">Minutes</label>
+        <select class="form-control" id="eMins">
+          <option value="0">0 min</option><option value="15">15 min</option>
+          <option value="30">30 min</option><option value="45">45 min</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label" for="eNotes">Notes</label>
+      <textarea class="form-control" id="eNotes" maxlength="300"></textarea>
+    </div>
+    <div class="msg-error" id="editErr"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="app.cancelEditLog()">Cancel</button>
+      <button class="btn btn-green" onclick="app.saveEditLog()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+  TOASTS
+═══════════════════════════════════════════════════ -->
+<div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
+
+
+<!-- ═══════════════════════════════════════════════════
+  PAGE: LOGIN
+═══════════════════════════════════════════════════ -->
+<div class="page active" id="page-login">
+  <div class="auth-outer">
+    <div class="auth-card">
+      <div class="auth-logo">📱 Grind Time</div>
+      <div class="auth-tagline">Help parents track and understand their children's video game time.</div>
+
+      <div class="msg-error" id="loginErr" role="alert"></div>
+
+      <div class="form-group">
+        <label class="form-label" for="loginEmail">Email address <span class="req">*</span></label>
+        <input class="form-control" type="email" id="loginEmail" placeholder="you@example.com"
+          autocomplete="email" aria-required="true">
+        <div class="field-err" id="loginEmailErr"></div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="loginPw">Password <span class="req">*</span></label>
+        <input class="form-control" type="password" id="loginPw" placeholder="Your password"
+          autocomplete="current-password" aria-required="true">
+        <div class="field-err" id="loginPwErr"></div>
+      </div>
+
+      <button class="btn btn-primary btn-block" style="margin-bottom:14px" id="loginBtn"
+        onclick="app.doLogin()">Sign In</button>
+
+      <p style="text-align:center;font-size:13px;color:var(--text-soft)">
+        No account?
+        <button class="btn btn-outline btn-sm" onclick="app.showPage('page-register')"
+          style="margin-left:6px">Create account</button>
+      </p>
+
+      <div style="margin-top:18px;padding:10px 12px;background:var(--amber-pale);
+        border:1px solid rgba(232,150,10,0.3);border-radius:var(--radius);
+        font-size:12px;color:#7a5000;line-height:1.7">
+        <strong>Demo admin:</strong> demo@grindtime.com / Demo1234!<br>
+        <strong>Demo standard:</strong> child@grindtime.com / Demo1234!
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══════════════════════════════════════════════════
+  PAGE: REGISTER
+═══════════════════════════════════════════════════ -->
+<div class="page" id="page-register">
+  <div class="auth-outer">
+    <div class="auth-card">
+      <div class="auth-logo">📱 Grind Time</div>
+      <div class="auth-tagline">Create your account to get started.</div>
+
+      <div class="msg-error" id="registerErr" role="alert"></div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label" for="regFirst">First name <span class="req">*</span></label>
+          <input class="form-control" type="text" id="regFirst" placeholder="Jane"
+            autocomplete="given-name" aria-required="true">
+          <div class="field-err" id="regFirstErr"></div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="regLast">Last name <span class="req">*</span></label>
+          <input class="form-control" type="text" id="regLast" placeholder="Smith"
+            autocomplete="family-name" aria-required="true">
+          <div class="field-err" id="regLastErr"></div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="regEmail">Email address <span class="req">*</span></label>
+        <input class="form-control" type="email" id="regEmail" placeholder="you@example.com"
+          autocomplete="email" aria-required="true">
+        <div class="field-err" id="regEmailErr"></div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="regPw">Password <span class="req">*</span></label>
+        <input class="form-control" type="password" id="regPw"
+          placeholder="Min. 8 characters, include a number" autocomplete="new-password"
+          aria-required="true" oninput="app.updatePwStrength(this.value)">
+        <div class="pw-bars" aria-hidden="true">
+          <div class="pw-bar" id="pwBar1"></div><div class="pw-bar" id="pwBar2"></div>
+          <div class="pw-bar" id="pwBar3"></div><div class="pw-bar" id="pwBar4"></div>
+        </div>
+        <div class="field-err" id="regPwErr"></div>
+        <div class="form-hint">At least 8 characters including a number.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="regConfirm">Confirm password <span class="req">*</span></label>
+        <input class="form-control" type="password" id="regConfirm" placeholder="Repeat your password"
+          autocomplete="new-password" aria-required="true">
+        <div class="field-err" id="regConfirmErr"></div>
+      </div>
+
+      <div class="form-hint" style="margin-bottom:14px">
+        New accounts are created with standard access. An existing admin can upgrade your
+        account from the Admin page if needed.
+      </div>
+
+      <button class="btn btn-primary btn-block" style="margin-bottom:14px" id="registerBtn"
+        onclick="app.doRegister()">Create Account</button>
+
+      <p style="text-align:center;font-size:13px;color:var(--text-soft)">
+        Already have an account?
+        <button class="btn btn-outline btn-sm" onclick="app.showPage('page-login')"
+          style="margin-left:6px">Sign in</button>
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════
+  APP: topbar + sidebar + main content
+═══════════════════════════════════════════════════ -->
+<div class="page" id="page-app">
+  <div class="app-shell">
+
+    <!-- TOPBAR -->
+    <header class="topbar">
+      <span class="topbar-title">📱 Grind Time</span>
+      <div class="topbar-spacer"></div>
+      <div class="topbar-user">
+        <span class="role-pill" id="topbarRole">Standard</span>
+        <span id="topbarName"></span>
+        <button class="btn btn-outline btn-sm"
+          style="color:rgba(255,255,255,0.8);border-color:rgba(255,255,255,0.3)"
+          onclick="app.doLogout()">Sign out</button>
+      </div>
+    </header>
+
+    <!-- SIDEBAR -->
+    <nav class="sidebar" aria-label="Main navigation">
+      <div class="nav-section-label">Main</div>
+      <button class="nav-link active" id="nav-dashboard" onclick="app.navigateTo('dashboard')">🏠 Dashboard</button>
+      <button class="nav-link" id="nav-sessions" onclick="app.navigateTo('sessions')">📋 Logs</button>
+      <button class="nav-link" id="nav-subjects" onclick="app.navigateTo('subjects')">🎮 Games</button>
+      <button class="nav-link" id="nav-predictions" onclick="app.navigateTo('predictions')">📈 Predictions</button>
+
+      <div class="nav-section-label">Account</div>
+      <button class="nav-link" id="nav-settings" onclick="app.navigateTo('settings')">⚙ Settings</button>
+      <button class="nav-link" id="nav-admin" onclick="app.navigateTo('admin')" hidden>🛡 Admin</button>
+
+      <div style="margin-top:28px">
+        <div class="info-box">
+          <span class="c">// Data store</span><br>
+          <span class="k">type:</span> <span class="v">"localStorage"</span><br>
+          <span class="c">// via Database class,</span><br>
+          <span class="c">// same interface a real</span><br>
+          <span class="c">// fetch()-based API would</span><br>
+          <span class="c">// sit behind.</span>
+        </div>
+      </div>
+    </nav>
+
+    <!-- MAIN -->
+    <main class="main">
+
+      <!-- ─── SECTION: DASHBOARD ─────────────────────── -->
+      <section id="section-dashboard">
+        <div class="section-header">
+          <div>
+            <div class="section-title" id="dashGreeting">Dashboard</div>
+            <div class="section-sub">Your overview of logged game time.</div>
+          </div>
+          <button class="btn btn-primary" onclick="app.navigateTo('sessions')">+ Log Game Time</button>
+        </div>
+
+        <div class="stats-row">
+          <div class="stat-card">
+            <div class="stat-value" id="statSessions">0</div>
+            <div class="stat-label">Total logs</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statHours">0h</div>
+            <div class="stat-label">Total game time</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statSubjects">0</div>
+            <div class="stat-label">Games tracked</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="statWeek">0h</div>
+            <div class="stat-label">Hours this week</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">Recent Logs</span>
+            <button class="btn btn-outline btn-sm" onclick="app.navigateTo('sessions')">View all →</button>
+          </div>
+          <div id="dashRecent">
+            <div class="empty">
+              <div class="empty-icon">📋</div>
+              <div class="empty-text">No logs yet. Go to Logs to add one.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title">Hours by Game</span></div>
+          <div class="card-body" id="dashChart">
+            <div class="empty"><div class="empty-text">Add some logs to see a breakdown here.</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── SECTION: SESSIONS ──────────────────────── -->
+      <section id="section-sessions" style="display:none">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Gaming Logs</div>
+            <div class="section-sub">Log, view, edit and delete gaming sessions here.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title">Log Game Time</span></div>
+          <div class="card-body">
+            <div class="msg-error"   id="sessionErr"></div>
+            <div class="msg-success" id="sessionOk"></div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="sDate">Date <span class="req">*</span></label>
+                <input class="form-control" type="date" id="sDate" aria-required="true">
+                <div class="field-err" id="sDateErr"></div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="sGame">Game <span class="req">*</span></label>
+                <select class="form-control" id="sGame" aria-required="true">
+                  <option value="">— select game —</option>
+                </select>
+                <div class="field-err" id="sGameErr"></div>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="sHours">Hours <span class="req">*</span></label>
+                <input class="form-control" type="number" id="sHours" min="0" max="12" value="1" placeholder="0">
+                <div class="field-err" id="sDurErr"></div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="sMins">Minutes</label>
+                <select class="form-control" id="sMins">
+                  <option value="0">0 min</option><option value="15">15 min</option>
+                  <option value="30" selected>30 min</option><option value="45">45 min</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="sNotes">Notes (optional)</label>
+              <textarea class="form-control" id="sNotes" placeholder="e.g. won a match, played with friends…" maxlength="300"></textarea>
+              <div class="form-hint">Max 300 characters.</div>
+            </div>
+
+            <button class="btn btn-primary" onclick="app.addLog()">Save Log</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title">All Logs</span></div>
+          <div class="card-body" style="padding-bottom:0">
+            <div class="filter-bar">
+              <input class="form-control" type="search" id="searchInput" placeholder="Search game or notes…"
+                style="flex:1" aria-label="Search sessions" oninput="app.renderLogsTable()">
+              <select class="form-control" id="filterGame" aria-label="Filter by game" style="width:180px"
+                onchange="app.renderLogsTable()"><option value="">All games</option></select>
+              <select class="form-control" id="sortLogs" aria-label="Sort logs" style="width:150px"
+                onchange="app.renderLogsTable()">
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="longest">Longest first</option>
+              </select>
+            </div>
+
+            <div class="table-wrap">
+              <table aria-label="Gaming logs">
+                <thead><tr><th>Date</th><th>Game</th><th>Duration</th><th>Notes</th><th>Actions</th></tr></thead>
+                <tbody id="sessionsBody"></tbody>
+              </table>
+            </div>
+
+            <div style="padding:10px 0;font-size:12px;color:var(--text-soft)">
+              <span id="sessionsCount">0 logs</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+
+      <!-- ─── SECTION: GAMES ──────────────────────────── -->
+      <section id="section-subjects" style="display:none">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Games</div>
+            <div class="section-sub">Add and manage the games you track.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title">Add a Game</span></div>
+          <div class="card-body">
+            <div class="msg-error"   id="subjectErr"></div>
+            <div class="msg-success" id="subjectOk"></div>
+
+            <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+              <div class="form-group" style="flex:1;min-width:180px;margin-bottom:0">
+                <label class="form-label" for="subName">Game name <span class="req">*</span></label>
+                <input class="form-control" type="text" id="subName" placeholder="e.g. Minecraft, Fortnite, Roblox">
+                <div class="field-err" id="subNameErr"></div>
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label class="form-label" for="subColour">Colour</label>
+                <select class="form-control" id="subColour">
+                  <option value="blue">Blue</option>
+                  <option value="green">Green</option>
+                  <option value="amber">Amber</option>
+                  <option value="red">Red</option>
+                  <option value="purple">Purple</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" onclick="app.addGame()" style="flex-shrink:0">Add Game</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title">Your Games</span></div>
+          <div class="table-wrap">
+            <table aria-label="Games">
+              <thead><tr><th>Game</th><th>Logs</th><th>Total Time</th><th>Actions</th></tr></thead>
+              <tbody id="subjectsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ─── SECTION: PREDICTIONS (ML feature) ──────── -->
+      <section id="section-predictions" style="display:none">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Predictions</div>
+            <div class="section-sub">A simple trend model forecasts each game's near-future playtime.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-body" id="predictionsSummary"></div>
+        </div>
+
+        <div class="predict-grid" id="predictionsGrid"></div>
+
+        <div class="card" style="margin-top:18px">
+          <div class="card-head"><span class="card-title">About this model</span></div>
+          <div class="card-body">
+            <div class="info-box" id="predictionsInfo" style="white-space:pre-line"></div>
+          </div>
+        </div>
+      </section>
+
+
+      <!-- ─── SECTION: ADMIN (admin role only) ───────── -->
+      <section id="section-admin" style="display:none">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Admin</div>
+            <div class="section-sub">Manage every account registered in this app.</div>
+          </div>
+        </div>
+
+        <div class="msg-error" id="adminErr"></div>
+
+        <div class="card">
+          <div class="card-head"><span class="card-title">All Users</span></div>
+          <div class="admin-note" style="padding:10px 18px 0">
+            You can't change your own role or delete your own account, to avoid locking yourself out.
+          </div>
+          <div class="table-wrap">
+            <table aria-label="All users">
+              <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Games</th><th>Logs</th><th>Joined</th><th>Actions</th></tr></thead>
+              <tbody id="adminUsersBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+
+      <!-- ─── SECTION: SETTINGS ──────────────────────── -->
+      <section id="section-settings" style="display:none">
+        <div class="section-header">
+          <div>
+            <div class="section-title">Settings</div>
+            <div class="section-sub">Update your profile details.</div>
+          </div>
+        </div>
+
+        <div class="card" style="max-width:480px">
+          <div class="card-head"><span class="card-title">Profile</span></div>
+          <div class="card-body">
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="setFirst">First name</label>
+                <input class="form-control" type="text" id="setFirst">
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="setLast">Last name</label>
+                <input class="form-control" type="text" id="setLast">
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="setEmail">Email (read only)</label>
+              <input class="form-control" type="email" id="setEmail" disabled style="background:#f5f5f5;cursor:not-allowed">
+            </div>
+            <div class="msg-success" id="profileOk"></div>
+            <button class="btn btn-primary" onclick="app.saveProfile()">Save Changes</button>
+          </div>
+        </div>
+
+        <div class="card" style="max-width:480px">
+          <div class="card-head"><span class="card-title">Change Password</span></div>
+          <div class="card-body">
+            <div class="info-box" style="margin-bottom:16px">
+              <span class="c">// Security: passwords are hashed client-side with</span><br>
+              <span class="k">SHA-256</span> <span class="c">+ a random salt, via the Web Crypto API</span><br>
+              <span class="c">// (see PasswordHasher). A real production backend would</span><br>
+              <span class="c">// additionally use a slow, salted algorithm such as</span><br>
+              <span class="k">bcrypt</span> <span class="c">or</span> <span class="k">argon2</span> <span class="c">on the server, since SHA-256 is fast</span><br>
+              <span class="c">// by design and not ideal for password storage alone.</span>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="curPw">Current password</label>
+              <input class="form-control" type="password" id="curPw">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="newPw">New password</label>
+              <input class="form-control" type="password" id="newPw">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="confPw">Confirm new password</label>
+              <input class="form-control" type="password" id="confPw">
+            </div>
+            <div class="msg-error"   id="pwErr"></div>
+            <div class="msg-success" id="pwOk"></div>
+            <button class="btn btn-primary" onclick="app.changePassword()">Update Password</button>
+          </div>
+        </div>
+
+        <div class="card" style="max-width:480px">
+          <div class="card-head"><span class="card-title">Data &amp; Export</span></div>
+          <div class="card-body">
+            <p class="form-hint" style="margin-bottom:12px">Download all of your logged sessions as a CSV file.</p>
+            <button class="btn btn-outline" onclick="app.exportCsv()">Export logs as CSV</button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div><!-- end .app-shell -->
+</div><!-- end #page-app -->
+
+<!-- ═══════════════════════════════════════════════════
+  JAVASCRIPT
+═══════════════════════════════════════════════════ -->
+<script>
+'use strict';
+'use strict';
+
+/* ═══════════════════════════════════════════════════════════
+   ERROR HIERARCHY
+   AppError is the common base so the UI layer can catch one
+   type and branch on `instanceof` to decide how to react.
+   ═══════════════════════════════════════════════════════════ */
+
+class AppError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = this.constructor.name;
+  }
+}
+
+class StorageError extends AppError {}
+class ValidationError extends AppError {}
+class PermissionError extends AppError {}
+class NotFoundError extends AppError {}
+
+
+/* ═══════════════════════════════════════════════════════════
+   DATABASE
+   Thin wrapper around localStorage. Every read/write is
+   funnelled through here so error handling (corrupted JSON,
+   storage disabled/full) lives in exactly one place instead
+   of being scattered through the app.
+   ═══════════════════════════════════════════════════════════ */
+
+class Database {
+  static get(key, fallback = null) {
+    let raw;
+    try {
+      raw = localStorage.getItem(key);
+    } catch (e) {
+      throw new StorageError('Could not read data. Your browser may be blocking storage.');
+    }
+    if (raw === null) return fallback;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      // Corrupted record — do not crash the app, just treat as empty.
+      return fallback;
+    }
+  }
+
+  static set(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (e) {
+      throw new StorageError('Could not save your data. Storage may be full or disabled.');
+    }
+  }
+
+  static remove(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch (e) {
+      throw new StorageError('Could not clear saved data.');
+    }
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   ID GENERATION
+   ═══════════════════════════════════════════════════════════ */
+
+function genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   DOMAIN MODELS
+   Plain OOP model classes. Repositories are responsible for
+   turning raw stored JSON into these instances and back again.
+   ═══════════════════════════════════════════════════════════ */
+
+class User {
+  constructor({ id, firstName, lastName, email, passwordHash, role = 'standard', createdAt }) {
+    this.id = id;
+    this.firstName = firstName;
+    this.lastName = lastName;
+    this.email = email;
+    this.passwordHash = passwordHash;
+    this.role = role; // 'admin' | 'standard'
+    this.createdAt = createdAt || new Date().toISOString();
+  }
+
+  get fullName() {
+    return `${this.firstName} ${this.lastName}`.trim();
+  }
+
+  isAdmin() {
+    return this.role === 'admin';
+  }
+
+  toJSON() {
+    return {
+      id: this.id, firstName: this.firstName, lastName: this.lastName,
+      email: this.email, passwordHash: this.passwordHash,
+      role: this.role, createdAt: this.createdAt,
+    };
+  }
+}
+
+class Game {
+  constructor({ id, userId, name, colour = 'blue' }) {
+    this.id = id;
+    this.userId = userId;
+    this.name = name;
+    this.colour = colour;
+  }
+
+  toJSON() {
+    return { id: this.id, userId: this.userId, name: this.name, colour: this.colour };
+  }
+}
+
+class GameLog {
+  constructor({ id, userId, gameId, date, durationMins, notes = '', createdAt }) {
+    this.id = id;
+    this.userId = userId;
+    this.gameId = gameId;
+    this.date = date;
+    this.durationMins = durationMins;
+    this.notes = notes;
+    this.createdAt = createdAt || new Date().toISOString();
+  }
+
+  get hours() {
+    return this.durationMins / 60;
+  }
+
+  toJSON() {
+    return {
+      id: this.id, userId: this.userId, gameId: this.gameId, date: this.date,
+      durationMins: this.durationMins, notes: this.notes, createdAt: this.createdAt,
+    };
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   REPOSITORY (base class) + subclasses
+   Generic CRUD over a single localStorage array. Subclasses
+   inherit findAll/findById/save/delete for free and only add
+   the query methods that are specific to that entity.
+   ═══════════════════════════════════════════════════════════ */
+
+class Repository {
+  constructor(storageKey, ModelClass) {
+    if (new.target === Repository) {
+      throw new TypeError('Repository is abstract and cannot be instantiated directly.');
+    }
+    this._storageKey = storageKey;
+    this._ModelClass = ModelClass;
+  }
+
+  _readAll() {
+    const rows = Database.get(this._storageKey, []);
+    return rows.map(row => new this._ModelClass(row));
+  }
+
+  _writeAll(models) {
+    Database.set(this._storageKey, models.map(m => m.toJSON()));
+  }
+
+  findAll() {
+    return this._readAll();
+  }
+
+  findById(id) {
+    return this._readAll().find(m => m.id === id) || null;
+  }
+
+  save(model) {
+    const rows = this._readAll();
+    const idx = rows.findIndex(m => m.id === model.id);
+    if (idx === -1) {
+      rows.push(model);
+    } else {
+      rows[idx] = model;
+    }
+    this._writeAll(rows);
+    return model;
+  }
+
+  delete(id) {
+    const rows = this._readAll();
+    const next = rows.filter(m => m.id !== id);
+    this._writeAll(next);
+    return next.length !== rows.length;
+  }
+}
+
+class UserRepository extends Repository {
+  constructor() { super('gt5_users', User); }
+
+  findByEmail(email) {
+    const lower = email.toLowerCase();
+    return this._readAll().find(u => u.email.toLowerCase() === lower) || null;
+  }
+}
+
+class GameRepository extends Repository {
+  constructor() { super('gt5_games', Game); }
+
+  findAllForUser(userId) {
+    return this._readAll().filter(g => g.userId === userId);
+  }
+
+  deleteAllForUser(userId) {
+    const rows = this._readAll().filter(g => g.userId !== userId);
+    this._writeAll(rows);
+  }
+}
+
+class GameLogRepository extends Repository {
+  constructor() { super('gt5_logs', GameLog); }
+
+  findAllForUser(userId) {
+    return this._readAll().filter(l => l.userId === userId);
+  }
+
+  findByGame(gameId) {
+    return this._readAll().filter(l => l.gameId === gameId);
+  }
+
+  deleteAllForUser(userId) {
+    const rows = this._readAll().filter(l => l.userId !== userId);
+    this._writeAll(rows);
+  }
+
+  deleteAllForGame(gameId) {
+    const rows = this._readAll().filter(l => l.gameId !== gameId);
+    this._writeAll(rows);
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   PASSWORD HASHER
+   Uses the browser's real Web Crypto API (SHA-256) with a
+   random per-user salt, instead of a toy hand-rolled hash.
+   This is genuine cryptographic hashing — still noted in the
+   UI that a production system would use a slow, salted
+   algorithm such as bcrypt/argon2 on a real server, since
+   SHA-256 is intentionally fast and therefore not ideal for
+   password storage on its own.
+   ═══════════════════════════════════════════════════════════ */
+
+class PasswordHasher {
+  static async hash(password) {
+    const salt = PasswordHasher._randomSalt();
+    const digest = await PasswordHasher._digest(salt + password);
+    return `${salt}:${digest}`;
+  }
+
+  static async verify(password, stored) {
+    if (!stored || !stored.includes(':')) return false;
+    const [salt, expected] = stored.split(':');
+    const digest = await PasswordHasher._digest(salt + password);
+    return digest === expected;
+  }
+
+  static _randomSalt() {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  static async _digest(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf), b => b.toString(16).padStart(2, '0')).join('');
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════
+   AUTH SERVICE
+   Owns the "who is logged in" state and enforces role checks.
+   ═══════════════════════════════════════════════════════════ */
+
+class AuthService {
+  constructor(userRepository) {
+    this.userRepository = userRepository;
+    this.currentUser = null;
+  }
+
+  async register({ firstName, lastName, email, password }) {
+    if (this.userRepository.findByEmail(email)) {
+      throw new ValidationError('An account with this email already exists.');
+    }
+    const user = new User({
+      id: genId(), firstName, lastName, email,
+      passwordHash: await PasswordHasher.hash(password),
+      role: 'standard',
+    });
+    this.userRepository.save(user);
+    this.currentUser = user;
+    Database.set('gt5_currentId', user.id);
+    return user;
+  }
+
+  async login(email, password) {
+    const user = this.userRepository.findByEmail(email);
+    if (!user || !(await PasswordHasher.verify(password, user.passwordHash))) {
+      throw new ValidationError('Incorrect email or password.');
+    }
+    this.currentUser = user;
+    Database.set('gt5_currentId', user.id);
+    return user;
+  }
+
+  logout() {
+    this.currentUser = null;
+    Database.remove('gt5_currentId');
+  }
+
+  restoreSession() {
+    const id = Database.get('gt5_currentId', null);
+    if (!id) return null;
+    const user = this.userRepository.findById(id);
+    if (user) this.currentUser = user;
+    return this.currentUser;
+  }
+
+  requireAdmin() {
+    if (!this.currentUser || !this.currentUser.isAdmin()) {
+      throw new PermissionError('You do not have permission to view this page.');
+    }
+  }
+
+  async changePassword(currentPassword, newPassword) {
+    if (!(await PasswordHasher.verify(currentPassword, this.currentUser.passwordHash))) {
+      throw new ValidationError('Current password is incorrect.');
+    }
+    this.currentUser.passwordHash = await PasswordHasher.hash(newPassword);
+    this.userRepository.save(this.currentUser);
+  }
+}
+
+
+/* Export for Node-based testing; harmless no-op in the browser. */
+if (typeof module !== 'undefined') {
+  module.exports = {
+    AppError, StorageError, ValidationError, PermissionError, NotFoundError,
+    Database, genId, User, Game, GameLog,
+    Repository, UserRepository, GameRepository, GameLogRepository,
+    PasswordHasher, AuthService,
+  };
+}
+'use strict';
+
+/* ═══════════════════════════════════════════════════════════
+   PLAYTIME PREDICTION MODEL
+   ---------------------------------------------------------
+   A small, dependency-free ML feature: simple linear
+   regression (least squares) fitted per game, on that game's
+   daily total playtime. It predicts future daily minutes and
+   flags whether a game's playtime is trending up, down, or
+   holding steady — genuinely useful for a parent deciding
+   whether to step in.
+
+   Kept as its own class with train() / predict() / evaluate()
+   so it is a self-contained, testable unit, independent of the
+   UI or storage layer (it is simply handed arrays of GameLog
+   objects).
+   ═══════════════════════════════════════════════════════════ */
+
+class PlaytimePredictionModel {
+  constructor() {
+    /** @type {Map<string, {slope:number, intercept:number, firstDay:number, n:number}>} */
+    this.models = new Map();
+    this.trained = false;
+  }
+
+  /**
+   * Groups raw logs into { gameId -> [{dayIndex, minutes}] } daily
+   * totals. This is the "data cleaning" step: multiple logs on the
+   * same day for the same game are summed into one data point, and
+   * logs with missing/invalid dates or non-positive durations are
+   * dropped before they ever reach the regression.
+   */
+  static _prepareDailyTotals(logs) {
+    const perGame = new Map();
+
+    for (const log of logs) {
+      if (!log.gameId || !log.date || !Number.isFinite(log.durationMins) || log.durationMins <= 0) {
+        continue; // discard incomplete/invalid records
+      }
+      const t = Date.parse(log.date);
+      if (Number.isNaN(t)) continue;
+
+      if (!perGame.has(log.gameId)) perGame.set(log.gameId, new Map());
+      const byDay = perGame.get(log.gameId);
+      byDay.set(log.date, (byDay.get(log.date) || 0) + log.durationMins);
+    }
+
+    // Convert each game's Map<date, minutes> into a sorted array of
+    // { dayIndex, minutes } points relative to that game's first day.
+    const result = new Map();
+    for (const [gameId, byDay] of perGame) {
+      const dates = [...byDay.keys()].sort();
+      const firstDay = Date.parse(dates[0]);
+      const points = dates.map(d => ({
+        dayIndex: Math.round((Date.parse(d) - firstDay) / 86400000),
+        minutes: byDay.get(d),
+      }));
+      result.set(gameId, { points, firstDay });
+    }
+    return result;
+  }
+
+  static _leastSquares(points) {
+    const n = points.length;
+    const sumX = points.reduce((a, p) => a + p.dayIndex, 0);
+    const sumY = points.reduce((a, p) => a + p.minutes, 0);
+    const sumXY = points.reduce((a, p) => a + p.dayIndex * p.minutes, 0);
+    const sumXX = points.reduce((a, p) => a + p.dayIndex * p.dayIndex, 0);
+
+    const denom = n * sumXX - sumX * sumX;
+    if (denom === 0) {
+      // All points on the same day (or only one point) — flat line.
+      return { slope: 0, intercept: sumY / n };
+    }
+    const slope = (n * sumXY - sumX * sumY) / denom;
+    const intercept = (sumY - slope * sumX) / n;
+    return { slope, intercept };
+  }
+
+  /** @param {GameLog[]} logs */
+  train(logs) {
+    this.models.clear();
+    const perGame = PlaytimePredictionModel._prepareDailyTotals(logs);
+
+    for (const [gameId, { points, firstDay }] of perGame) {
+      const lastDayIndex = points[points.length - 1].dayIndex;
+      if (points.length < 2) {
+        // Not enough distinct days to fit a trend line — fall back
+        // to a flat prediction at the single known value.
+        this.models.set(gameId, {
+          slope: 0, intercept: points[0]?.minutes || 0, firstDay, n: points.length, lastDayIndex,
+        });
+        continue;
+      }
+      const { slope, intercept } = PlaytimePredictionModel._leastSquares(points);
+      this.models.set(gameId, { slope, intercept, firstDay, n: points.length, lastDayIndex });
+    }
+    this.trained = true;
+    return this;
+  }
+
+  /** Predicted minutes for a game `daysAhead` days after its last known data point. */
+  predict(gameId, daysAhead = 1) {
+    const model = this.models.get(gameId);
+    if (!model) return null;
+    const lastDayIndex = this._lastDayIndex(gameId);
+    const x = lastDayIndex + daysAhead;
+    const value = model.slope * x + model.intercept;
+    return Math.max(0, Math.round(value));
+  }
+
+  /** 'increasing' | 'decreasing' | 'stable', based on slope relative to intercept. */
+  trend(gameId) {
+    const model = this.models.get(gameId);
+    if (!model || model.n < 2) return 'insufficient-data';
+    // A week of drift smaller than ~10% of the average day is "stable" noise.
+    const weeklyChange = model.slope * 7;
+    const baseline = Math.max(1, model.intercept);
+    if (weeklyChange > baseline * 0.1) return 'increasing';
+    if (weeklyChange < -baseline * 0.1) return 'decreasing';
+    return 'stable';
+  }
+
+  /**
+   * Holds out the most recent ~20% of each game's data points,
+   * trains on the rest, and measures prediction error against the
+   * held-out actuals. Returns Mean Absolute Error in minutes.
+   */
+  evaluate(logs) {
+    const perGame = PlaytimePredictionModel._prepareDailyTotals(logs);
+    let errors = [];
+
+    for (const [gameId, { points }] of perGame) {
+      if (points.length < 5) continue; // need enough points for a meaningful holdout
+      const splitAt = Math.max(2, Math.floor(points.length * 0.8));
+      const trainPoints = points.slice(0, splitAt);
+      const testPoints = points.slice(splitAt);
+      if (!testPoints.length) continue;
+
+      const { slope, intercept } = PlaytimePredictionModel._leastSquares(trainPoints);
+      for (const p of testPoints) {
+        const predicted = Math.max(0, slope * p.dayIndex + intercept);
+        errors.push(Math.abs(predicted - p.minutes));
+      }
+    }
+
+    if (!errors.length) return { mae: null, rmse: null, sampleSize: 0 };
+    const mae = errors.reduce((a, e) => a + e, 0) / errors.length;
+    const rmse = Math.sqrt(errors.reduce((a, e) => a + e * e, 0) / errors.length);
+    return { mae: Math.round(mae), rmse: Math.round(rmse), sampleSize: errors.length };
+  }
+
+  _lastDayIndex(gameId) {
+    const model = this.models.get(gameId);
+    // We only stored slope/intercept, not the raw points, so recompute
+    // the last index from n and firstDay isn't reliable — instead track
+    // it explicitly by re-deriving from stored n (n-1 spacing assumption
+    // is wrong for sparse data), so store it during train() instead.
+    return model.lastDayIndex ?? 0;
+  }
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = { PlaytimePredictionModel };
+}
+
+/* ═══════════════════════════════════════════════════════════
+   APP — the main controller / presentation layer.
+   Everything above this point (Database, Repository family,
+   models, PasswordHasher, AuthService, PlaytimePredictionModel)
+   is DOM-independent and was unit-tested outside the browser.
+   App is the one class allowed to touch document/localStorage
+   UI concerns; it composes the services above rather than
+   re-implementing any of their logic.
+   ═══════════════════════════════════════════════════════════ */
+
+const COLOURS = {
+  blue: 'badge-blue', green: 'badge-green', amber: 'badge-amber',
+  red: 'badge-red', purple: 'badge-purple',
+};
+
+class App {
+  constructor() {
+    this.userRepo = new UserRepository();
+    this.gameRepo = new GameRepository();
+    this.logRepo  = new GameLogRepository();
+    this.auth     = new AuthService(this.userRepo);
+    this.predictionModel = new PlaytimePredictionModel();
+
+    this._modalCallback = null;
+    this._editingLogId = null;
+  }
+
+  /* ── Boot ─────────────────────────────────────────── */
+
+  async init() {
+    try {
+      await this._seedDemoData();
+    } catch (e) {
+      this._reportError(e);
+    }
+    let restored = null;
+    try {
+      restored = this.auth.restoreSession();
+    } catch (e) {
+      this._reportError(e);
+    }
+    if (restored) {
+      this._enterApp();
+    } else {
+      this.showPage('page-login');
+    }
+  }
+
+  showPage(pageId) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById(pageId).classList.add('active');
+  }
+
+  _enterApp() {
+    this.showPage('page-app');
+    const user = this.auth.currentUser;
+    document.getElementById('topbarName').textContent = user.fullName;
+    const rolePill = document.getElementById('topbarRole');
+    rolePill.textContent = user.isAdmin() ? 'Admin' : 'Standard';
+    rolePill.classList.toggle('admin', user.isAdmin());
+    document.getElementById('nav-admin').hidden = !user.isAdmin();
+
+    const h = new Date().getHours();
+    const greeting = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+    document.getElementById('dashGreeting').textContent = `${greeting}, ${user.firstName} 👋`;
+
+    document.getElementById('sDate').value = this._todayStr();
+    this.navigateTo('dashboard');
+  }
+
+  /* ── Navigation ───────────────────────────────────── */
+
+  navigateTo(name) {
+    if (name === 'admin') {
+      try {
+        this.auth.requireAdmin();
+      } catch (e) {
+        this.toast(e.message, 'error');
+        name = 'dashboard'; // fall back somewhere safe instead of a blank/broken page
+      }
+    }
+
+    document.querySelectorAll('section[id^="section-"]').forEach(s => { s.style.display = 'none'; });
+    document.querySelectorAll('.nav-link').forEach(b => { b.classList.remove('active'); b.removeAttribute('aria-current'); });
+
+    const section = document.getElementById('section-' + name);
+    const navBtn  = document.getElementById('nav-' + name);
+    if (section) section.style.display = 'block';
+    if (navBtn)  { navBtn.classList.add('active'); navBtn.setAttribute('aria-current', 'page'); }
+
+    try {
+      if (name === 'dashboard')   this.renderDashboard();
+      if (name === 'sessions')    { this._populateGameDropdowns(); this.renderLogsTable(); }
+      if (name === 'subjects')    this.renderGamesTable();
+      if (name === 'predictions') this.renderPredictions();
+      if (name === 'admin')       this.renderAdmin();
+      if (name === 'settings')    this._populateSettings();
+    } catch (e) {
+      this._reportError(e);
+    }
+  }
+
+  /* ── Auth ─────────────────────────────────────────── */
+
+  async doLogin() {
+    const email = document.getElementById('loginEmail').value.trim();
+    const pw    = document.getElementById('loginPw').value;
+    const errBox = document.getElementById('loginErr');
+
+    this._clearFieldErr('loginEmail', 'loginEmailErr');
+    this._clearFieldErr('loginPw', 'loginPwErr');
+    errBox.style.display = 'none';
+
+    let ok = true;
+    if (!email) { this._showFieldErr('loginEmail', 'loginEmailErr', 'Email is required.'); ok = false; }
+    else if (!this._isEmail(email)) { this._showFieldErr('loginEmail', 'loginEmailErr', 'Enter a valid email address.'); ok = false; }
+    if (!pw) { this._showFieldErr('loginPw', 'loginPwErr', 'Password is required.'); ok = false; }
+    if (!ok) return;
+
+    const btn = document.getElementById('loginBtn');
+    btn.disabled = true;
+    try {
+      await this.auth.login(email, pw);
+      this._enterApp();
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        errBox.textContent = e.message;
+        errBox.style.display = 'block';
+      } else {
+        this._reportError(e);
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async doRegister() {
+    const first   = document.getElementById('regFirst').value.trim();
+    const last    = document.getElementById('regLast').value.trim();
+    const email   = document.getElementById('regEmail').value.trim();
+    const pw      = document.getElementById('regPw').value;
+    const confirm = document.getElementById('regConfirm').value;
+    const errBox  = document.getElementById('registerErr');
+
+    ['regFirst', 'regLast', 'regEmail', 'regPw', 'regConfirm'].forEach(id => this._clearFieldErr(id, id + 'Err'));
+    errBox.style.display = 'none';
+
+    let ok = true;
+    if (!first) { this._showFieldErr('regFirst', 'regFirstErr', 'First name is required.'); ok = false; }
+    if (!last)  { this._showFieldErr('regLast', 'regLastErr', 'Last name is required.'); ok = false; }
+    if (!email) { this._showFieldErr('regEmail', 'regEmailErr', 'Email is required.'); ok = false; }
+    else if (!this._isEmail(email)) { this._showFieldErr('regEmail', 'regEmailErr', 'Enter a valid email address.'); ok = false; }
+    if (!pw) { this._showFieldErr('regPw', 'regPwErr', 'Password is required.'); ok = false; }
+    else if (pw.length < 8) { this._showFieldErr('regPw', 'regPwErr', 'Password must be at least 8 characters.'); ok = false; }
+    else if (!/\d/.test(pw)) { this._showFieldErr('regPw', 'regPwErr', 'Password must include at least one number.'); ok = false; }
+    if (pw !== confirm) { this._showFieldErr('regConfirm', 'regConfirmErr', 'Passwords do not match.'); ok = false; }
+    if (!ok) return;
+
+    const btn = document.getElementById('registerBtn');
+    btn.disabled = true;
+    try {
+      await this.auth.register({ firstName: first, lastName: last, email, password: pw });
+      this._enterApp();
+    } catch (e) {
+      if (e instanceof ValidationError) {
+        this._showFieldErr('regEmail', 'regEmailErr', e.message);
+      } else {
+        this._reportError(e);
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  doLogout() {
+    this.auth.logout();
+    this.showPage('page-login');
+    document.getElementById('loginEmail').value = '';
+    document.getElementById('loginPw').value = '';
+  }
+
+  updatePwStrength(val) {
+    let score = 0;
+    if (val.length >= 8) score++;
+    if (val.length >= 12) score++;
+    if (/\d/.test(val)) score++;
+    if (/[^a-zA-Z0-9]/.test(val)) score++;
+    const colours = ['', '#c0392b', '#e8960a', '#e8960a', '#2e7d52'];
+    for (let i = 1; i <= 4; i++) {
+      document.getElementById('pwBar' + i).style.background = i <= score ? (colours[score] || colours[4]) : 'var(--border)';
+    }
+  }
+
+  /* ── Dashboard ────────────────────────────────────── */
+
+  renderDashboard() {
+    const logs = this._myLogs();
+    const games = this._myGames();
+
+    const totalMins = logs.reduce((a, s) => a + s.durationMins, 0);
+    const weekAgo = Date.now() - 7 * 86400000;
+    const weekMins = logs.filter(l => Date.parse(l.date) >= weekAgo).reduce((a, s) => a + s.durationMins, 0);
+
+    document.getElementById('statSessions').textContent = logs.length;
+    document.getElementById('statHours').textContent = (totalMins / 60).toFixed(1) + 'h';
+    document.getElementById('statSubjects').textContent = games.length;
+    document.getElementById('statWeek').textContent = (weekMins / 60).toFixed(1) + 'h';
+
+    const recent = [...logs].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
+    const el = document.getElementById('dashRecent');
+    if (!recent.length) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">📋</div><div class="empty-text">No logs yet. Go to Logs to add one.</div></div>';
+    } else {
+      el.innerHTML = '<table><thead><tr><th>Date</th><th>Game</th><th>Duration</th></tr></thead><tbody>' +
+        recent.map(l => {
+          const game = games.find(g => g.id === l.gameId);
+          return `<tr><td>${this._esc(l.date)}</td><td>${this._gameBadge(game)}</td><td>${l.durationMins} min</td></tr>`;
+        }).join('') + '</tbody></table>';
+    }
+
+    const chartEl = document.getElementById('dashChart');
+    if (!logs.length) {
+      chartEl.innerHTML = '<div class="empty"><div class="empty-text">Add some logs to see a breakdown here.</div></div>';
+    } else {
+      const byGame = games.map(g => ({
+        game: g,
+        mins: logs.filter(l => l.gameId === g.id).reduce((a, l) => a + l.durationMins, 0),
+      })).filter(x => x.mins > 0).sort((a, b) => b.mins - a.mins);
+      const max = Math.max(...byGame.map(x => x.mins), 1);
+      chartEl.innerHTML = byGame.map(x => `
+        <div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+            <span>${this._esc(x.game.name)}</span><span>${(x.mins / 60).toFixed(1)}h</span>
+          </div>
+          <div style="background:var(--bg);border-radius:4px;height:8px;overflow:hidden">
+            <div style="background:var(--navy);height:100%;width:${(x.mins / max) * 100}%"></div>
+          </div>
+        </div>`).join('');
+    }
+  }
+
+  /* ── Logs (GameLog) CRUD ──────────────────────────── */
+
+  addLog() {
+    const date  = document.getElementById('sDate').value;
+    const gameId = document.getElementById('sGame').value;
+    const hours = parseInt(document.getElementById('sHours').value, 10) || 0;
+    const mins  = parseInt(document.getElementById('sMins').value, 10) || 0;
+    const notes = document.getElementById('sNotes').value.trim().slice(0, 300);
+    const dur   = hours * 60 + mins;
+    const errBox = document.getElementById('sessionErr');
+    const okBox  = document.getElementById('sessionOk');
+
+    errBox.style.display = 'none';
+    okBox.style.display = 'none';
+    this._clearFieldErr('sDate', 'sDateErr');
+    this._clearFieldErr('sGame', 'sGameErr');
+    this._clearFieldErr('sHours', 'sDurErr');
+
+    let ok = true;
+    if (!date) { this._showFieldErr('sDate', 'sDateErr', 'Date is required.'); ok = false; }
+    else if (date > this._todayStr()) { this._showFieldErr('sDate', 'sDateErr', 'Date cannot be in the future.'); ok = false; }
+    if (!gameId) { this._showFieldErr('sGame', 'sGameErr', 'Please select a game.'); ok = false; }
+    if (dur <= 0) { this._showFieldErr('sHours', 'sDurErr', 'Duration must be at least 1 minute.'); ok = false; }
+    else if (dur > 480) { this._showFieldErr('sHours', 'sDurErr', 'A single session over 8 hours looks like a mistake — please check it.'); ok = false; }
+    if (!ok) return;
+
+    try {
+      this.logRepo.save(new GameLog({
+        id: genId(), userId: this.auth.currentUser.id, gameId, date, durationMins: dur, notes,
+      }));
+    } catch (e) { this._reportError(e); return; }
+
+    document.getElementById('sGame').value = '';
+    document.getElementById('sHours').value = '1';
+    document.getElementById('sMins').value = '30';
+    document.getElementById('sNotes').value = '';
+
+    okBox.textContent = '✓ Gaming session logged!';
+    okBox.style.display = 'block';
+    setTimeout(() => { okBox.style.display = 'none'; }, 2500);
+
+    this.renderLogsTable();
+    this.toast('Log added.', 'success');
+  }
+
+  renderLogsTable() {
+    const logs = this._myLogs();
+    const games = this._myGames();
+    const search = (document.getElementById('searchInput')?.value || '').toLowerCase();
+    const filterGame = document.getElementById('filterGame')?.value || '';
+    const sortMode = document.getElementById('sortLogs')?.value || 'newest';
+
+    const filterEl = document.getElementById('filterGame');
+    if (filterEl) {
+      const cur = filterEl.value;
+      filterEl.innerHTML = '<option value="">All games</option>' +
+        games.map(g => `<option value="${g.id}"${g.id === cur ? ' selected' : ''}>${this._esc(g.name)}</option>`).join('');
+    }
+
+    let rows = logs.map(l => ({ log: l, game: games.find(g => g.id === l.gameId) }));
+    if (filterGame) rows = rows.filter(r => r.log.gameId === filterGame);
+    if (search) rows = rows.filter(r => (r.game?.name || '').toLowerCase().includes(search) || (r.log.notes || '').toLowerCase().includes(search));
+
+    if (sortMode === 'newest') rows.sort((a, b) => new Date(b.log.date) - new Date(a.log.date));
+    else if (sortMode === 'oldest') rows.sort((a, b) => new Date(a.log.date) - new Date(b.log.date));
+    else if (sortMode === 'longest') rows.sort((a, b) => b.log.durationMins - a.log.durationMins);
+
+    const tbody = document.getElementById('sessionsBody');
+    if (!rows.length) {
+      tbody.innerHTML = `<tr><td colspan="5"><div class="empty"><div class="empty-icon">📋</div>
+        <div class="empty-text">${logs.length ? 'No logs match your search or filter.' : 'No logs yet. Use the form above to add one.'}</div></div></td></tr>`;
+    } else {
+      tbody.innerHTML = rows.map(r => `
+        <tr>
+          <td>${this._esc(r.log.date)}</td>
+          <td>${this._gameBadge(r.game)}</td>
+          <td style="white-space:nowrap">${r.log.durationMins} min
+            <span style="color:var(--text-soft);font-size:12px">(${(r.log.durationMins / 60).toFixed(1)}h)</span></td>
+          <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this._esc(r.log.notes || '')}">${this._esc(r.log.notes || '—')}</td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-outline btn-sm" onclick="app.openEditLog('${r.log.id}')" aria-label="Edit log from ${r.log.date}">Edit</button>
+            <button class="btn btn-red btn-sm" onclick="app.deleteLog('${r.log.id}')" aria-label="Delete log from ${r.log.date}" style="margin-left:4px">Delete</button>
+          </td>
+        </tr>`).join('');
+    }
+
+    document.getElementById('sessionsCount').textContent =
+      rows.length + ' log' + (rows.length !== 1 ? 's' : '') + (rows.length !== logs.length ? ` (filtered from ${logs.length})` : '');
+  }
+
+  openEditLog(id) {
+    const log = this.logRepo.findById(id);
+    if (!log || log.userId !== this.auth.currentUser.id) { this.toast('Log not found.', 'error'); return; }
+
+    this._editingLogId = id;
+    document.getElementById('editId').value = id;
+    document.getElementById('eDate').value = log.date;
+    const { hours, mins } = this._splitDuration(log.durationMins);
+    document.getElementById('eHours').value = hours;
+    document.getElementById('eMins').value = mins;
+    document.getElementById('eNotes').value = log.notes || '';
+
+    this._populateGameDropdowns();
+    document.getElementById('eGame').value = log.gameId;
+    document.getElementById('editErr').style.display = 'none';
+    document.getElementById('editModal').classList.add('visible');
+  }
+
+  saveEditLog() {
+    const id = document.getElementById('editId').value;
+    const date = document.getElementById('eDate').value;
+    const gameId = document.getElementById('eGame').value;
+    const hours = parseInt(document.getElementById('eHours').value, 10) || 0;
+    const mins = parseInt(document.getElementById('eMins').value, 10) || 0;
+    const notes = document.getElementById('eNotes').value.trim().slice(0, 300);
+    const dur = hours * 60 + mins;
+    const errBox = document.getElementById('editErr');
+    errBox.style.display = 'none';
+
+    if (!date || !gameId || dur <= 0) {
+      errBox.textContent = 'Date, game and duration are all required.';
+      errBox.style.display = 'block';
+      return;
+    }
+    if (date > this._todayStr()) {
+      errBox.textContent = 'Date cannot be in the future.';
+      errBox.style.display = 'block';
+      return;
+    }
+    if (dur > 480) {
+      errBox.textContent = 'A single session over 8 hours looks like a mistake — please check it.';
+      errBox.style.display = 'block';
+      return;
+    }
+
+    const log = this.logRepo.findById(id);
+    if (!log || log.userId !== this.auth.currentUser.id) { this.toast('Log not found.', 'error'); this.cancelEditLog(); return; }
+
+    log.date = date; log.gameId = gameId; log.durationMins = dur; log.notes = notes;
+    try {
+      this.logRepo.save(log);
+    } catch (e) { this._reportError(e); return; }
+
+    this.cancelEditLog();
+    this.renderLogsTable();
+    this.renderDashboard();
+    this.toast('Log updated.', 'success');
+  }
+
+  cancelEditLog() {
+    document.getElementById('editModal').classList.remove('visible');
+    document.getElementById('editId').value = '';
+    this._editingLogId = null;
+  }
+
+  deleteLog(id) {
+    const log = this.logRepo.findById(id);
+    if (!log || log.userId !== this.auth.currentUser.id) { this.toast('Log not found.', 'error'); return; }
+    const game = this._myGames().find(g => g.id === log.gameId);
+    this.showModal('Delete log?', `Delete the ${game ? game.name : 'this'} log from ${log.date}? This cannot be undone.`, () => {
+      try {
+        this.logRepo.delete(id);
+      } catch (e) { this._reportError(e); return; }
+      this.renderLogsTable();
+      this.renderDashboard();
+      this.toast('Log deleted.', 'success');
+    });
+  }
+
+  /* ── Games CRUD ───────────────────────────────────── */
+
+  addGame() {
+    const name = document.getElementById('subName').value.trim();
+    const colour = document.getElementById('subColour').value;
+    const errBox = document.getElementById('subjectErr');
+    const okBox = document.getElementById('subjectOk');
+    errBox.style.display = 'none';
+    okBox.style.display = 'none';
+    this._clearFieldErr('subName', 'subNameErr');
+
+    if (!name) { this._showFieldErr('subName', 'subNameErr', 'Game name is required.'); return; }
+    if (this._myGames().find(g => g.name.toLowerCase() === name.toLowerCase())) {
+      this._showFieldErr('subName', 'subNameErr', 'You already have a game with this name.');
+      return;
+    }
+
+    try {
+      this.gameRepo.save(new Game({ id: genId(), userId: this.auth.currentUser.id, name, colour }));
+    } catch (e) { this._reportError(e); return; }
+
+    document.getElementById('subName').value = '';
+    okBox.textContent = '✓ Game added.';
+    okBox.style.display = 'block';
+    setTimeout(() => { okBox.style.display = 'none'; }, 2500);
+
+    this.renderGamesTable();
+    this.toast('Game added.', 'success');
+  }
+
+  renameGame(id) {
+    const game = this._myGames().find(g => g.id === id);
+    if (!game) return;
+    const newName = window.prompt(`Enter a new name for "${game.name}":`, game.name);
+    if (!newName || !newName.trim() || newName.trim() === game.name) return;
+    game.name = newName.trim();
+    try {
+      this.gameRepo.save(game);
+    } catch (e) { this._reportError(e); return; }
+    this.renderGamesTable();
+    this.toast('Game renamed.', 'success');
+  }
+
+  deleteGame(id) {
+    const game = this._myGames().find(g => g.id === id);
+    if (!game) return;
+    const count = this._myLogs().filter(l => l.gameId === id).length;
+    this.showModal('Delete game?', `This will also delete ${count} linked log${count !== 1 ? 's' : ''}. This cannot be undone.`, () => {
+      try {
+        this.gameRepo.delete(id);
+        this.logRepo.deleteAllForGame(id);
+      } catch (e) { this._reportError(e); return; }
+      this.renderGamesTable();
+      this.renderLogsTable();
+      this.renderDashboard();
+      this.toast('Game deleted.', 'success');
+    });
+  }
+
+  renderGamesTable() {
+    const games = this._myGames();
+    const logs = this._myLogs();
+    const tbody = document.getElementById('subjectsBody');
+
+    if (!games.length) {
+      tbody.innerHTML = '<tr><td colspan="4"><div class="empty"><div class="empty-icon">📖</div><div class="empty-text">No games yet. Add one above.</div></div></td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = games.map(g => {
+      const linked = logs.filter(l => l.gameId === g.id);
+      const totalMins = linked.reduce((a, l) => a + l.durationMins, 0);
+      return `<tr>
+        <td>${this._gameBadge(g)}</td>
+        <td>${linked.length}</td>
+        <td>${(totalMins / 60).toFixed(1)}h</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-outline btn-sm" onclick="app.renameGame('${g.id}')" aria-label="Rename ${this._esc(g.name)}">Rename</button>
+          <button class="btn btn-red btn-sm" onclick="app.deleteGame('${g.id}')" aria-label="Delete ${this._esc(g.name)}" style="margin-left:4px">Delete</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  _populateGameDropdowns() {
+    const games = this._myGames();
+    const opt = '<option value="">— select game —</option>' + games.map(g => `<option value="${g.id}">${this._esc(g.name)}</option>`).join('');
+    ['sGame', 'eGame'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const cur = el.value;
+      el.innerHTML = opt;
+      if (cur) el.value = cur;
+    });
+    const f = document.getElementById('filterGame');
+    if (f) {
+      const cur = f.value;
+      f.innerHTML = '<option value="">All games</option>' + games.map(g => `<option value="${g.id}"${g.id === cur ? ' selected' : ''}>${this._esc(g.name)}</option>`).join('');
+    }
+  }
+
+  /* ── Predictions (ML) ─────────────────────────────── */
+
+  renderPredictions() {
+    const logs = this._myLogs();
+    const games = this._myGames();
+
+    this.predictionModel.train(logs);
+    const evalResult = this.predictionModel.evaluate(logs);
+
+    const summaryEl = document.getElementById('predictionsSummary');
+    if (evalResult.mae === null) {
+      summaryEl.innerHTML = `<div class="empty"><div class="empty-text">Not enough logs yet to evaluate accuracy. Keep logging sessions and this will fill in.</div></div>`;
+    } else {
+      summaryEl.innerHTML = `
+        <div style="display:flex;gap:28px;flex-wrap:wrap">
+          <div><div class="stat-value" style="font-size:22px">±${evalResult.mae} min</div><div class="stat-label">Typical prediction error (MAE)</div></div>
+          <div><div class="stat-value" style="font-size:22px">${evalResult.sampleSize}</div><div class="stat-label">Held-out days used to test accuracy</div></div>
+        </div>`;
+    }
+
+    const gridEl = document.getElementById('predictionsGrid');
+    const gamesWithData = games.filter(g => this.predictionModel.models.has(g.id));
+
+    if (!gamesWithData.length) {
+      gridEl.innerHTML = `<div class="empty"><div class="empty-icon">📈</div><div class="empty-text">Log a few sessions for a game to unlock its trend forecast.</div></div>`;
+    } else {
+      gridEl.innerHTML = gamesWithData.map(g => {
+        const trend = this.predictionModel.trend(g.id);
+        const trendLabel = { increasing: '↑ Rising', decreasing: '↓ Falling', stable: '→ Stable', 'insufficient-data': 'Not enough data' }[trend];
+        const trendClass = { increasing: 'trend-up', decreasing: 'trend-down', stable: 'trend-flat', 'insufficient-data': 'trend-flat' }[trend];
+
+        const forecast = [1, 2, 3, 4, 5, 6, 7].map(d => this.predictionModel.predict(g.id, d));
+        const max = Math.max(...forecast, 1);
+        const bars = forecast.map((v, i) => `<div class="mini-bar${i === 0 ? ' today' : ''}" style="height:${Math.max(4, (v / max) * 46)}px" title="Day +${i + 1}: ${v} min"></div>`).join('');
+
+        return `<div class="predict-card">
+          <div class="predict-card-head">
+            <span class="predict-game-name">${this._esc(g.name)}</span>
+            <span class="${trendClass}">${trendLabel}</span>
+          </div>
+          <div class="mini-bars">${bars}</div>
+          <div class="predict-row"><span>Predicted tomorrow</span><strong>${forecast[0]} min</strong></div>
+          <div class="predict-row"><span>Predicted in 7 days</span><strong>${forecast[6]} min</strong></div>
+        </div>`;
+      }).join('');
+    }
+
+    document.getElementById('predictionsInfo').textContent =
+`Training data: this user's own logged sessions (GameLog records) — currently ${logs.length} logs across ${games.length} games.
+
+Preparation: sessions are grouped by game and by day, summing same-day duplicates into one data point; logs with a missing date, missing game, or a non-positive duration are dropped before training (see PlaytimePredictionModel._prepareDailyTotals).
+
+Method: a simple least-squares linear regression fitted per game (minutes/day vs. day index). Games need at least 2 distinct logging days to get a trend line, and at least 5 to be included in the accuracy check below (which trains on the first ~80% of days and tests on the rest).
+
+Limitation: small numbers of logs give noisy trend lines — treat early predictions as rough estimates that improve as more sessions are logged.`;
+  }
+
+  /* ── Admin ────────────────────────────────────────── */
+
+  renderAdmin() {
+    const users = this.userRepo.findAll();
+    const errBox = document.getElementById('adminErr');
+    errBox.style.display = 'none';
+
+    document.getElementById('adminUsersBody').innerHTML = users.map(u => {
+      const games = this.gameRepo.findAllForUser(u.id);
+      const logs = this.logRepo.findAllForUser(u.id);
+      const isSelf = u.id === this.auth.currentUser.id;
+      const roleBadge = u.isAdmin() ? '<span class="badge badge-amber">Admin</span>' : '<span class="badge badge-blue">Standard</span>';
+      const joined = new Date(u.createdAt).toLocaleDateString();
+
+      const roleBtn = isSelf ? '' : (u.isAdmin()
+        ? `<button class="btn btn-outline btn-sm" onclick="app.demoteUser('${u.id}')">Demote</button>`
+        : `<button class="btn btn-amber btn-sm" onclick="app.promoteUser('${u.id}')">Promote</button>`);
+      const delBtn = isSelf ? '' : `<button class="btn btn-red btn-sm" onclick="app.deleteUserAccount('${u.id}')" style="margin-left:4px">Delete</button>`;
+
+      return `<tr>
+        <td>${this._esc(u.fullName)}${isSelf ? ' <span style="color:var(--text-soft);font-size:11px">(you)</span>' : ''}</td>
+        <td>${this._esc(u.email)}</td>
+        <td>${roleBadge}</td>
+        <td>${games.length}</td>
+        <td>${logs.length}</td>
+        <td>${joined}</td>
+        <td style="white-space:nowrap">${roleBtn}${delBtn}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  promoteUser(id) {
+    this._changeRole(id, 'admin');
+  }
+
+  demoteUser(id) {
+    this._changeRole(id, 'standard');
+  }
+
+  _changeRole(id, role) {
+    try {
+      this.auth.requireAdmin();
+      if (id === this.auth.currentUser.id) throw new PermissionError("You can't change your own role.");
+      const user = this.userRepo.findById(id);
+      if (!user) throw new NotFoundError('User not found.');
+      user.role = role;
+      this.userRepo.save(user);
+      this.renderAdmin();
+      this.toast(`${user.fullName} is now ${role === 'admin' ? 'an admin' : 'a standard user'}.`, 'success');
+    } catch (e) {
+      this._showAdminErr(e);
+    }
+  }
+
+  deleteUserAccount(id) {
+    try {
+      this.auth.requireAdmin();
+      if (id === this.auth.currentUser.id) throw new PermissionError("You can't delete your own account from here.");
+      const user = this.userRepo.findById(id);
+      if (!user) throw new NotFoundError('User not found.');
+
+      this.showModal('Delete this account?', `This permanently deletes ${user.fullName}'s account, games, and logs. This cannot be undone.`, () => {
+        try {
+          this.userRepo.delete(id);
+          this.gameRepo.deleteAllForUser(id);
+          this.logRepo.deleteAllForUser(id);
+          this.renderAdmin();
+          this.toast('Account deleted.', 'success');
+        } catch (e) { this._reportError(e); }
+      });
+    } catch (e) {
+      this._showAdminErr(e);
+    }
+  }
+
+  _showAdminErr(e) {
+    if (e instanceof AppError) {
+      const box = document.getElementById('adminErr');
+      box.textContent = e.message;
+      box.style.display = 'block';
+    } else {
+      this._reportError(e);
+    }
+  }
+
+  /* ── Settings ─────────────────────────────────────── */
+
+  _populateSettings() {
+    const u = this.auth.currentUser;
+    document.getElementById('setFirst').value = u.firstName || '';
+    document.getElementById('setLast').value = u.lastName || '';
+    document.getElementById('setEmail').value = u.email || '';
+  }
+
+  saveProfile() {
+    const first = document.getElementById('setFirst').value.trim();
+    const last = document.getElementById('setLast').value.trim();
+    const user = this.auth.currentUser;
+    user.firstName = first;
+    user.lastName = last;
+    try {
+      this.userRepo.save(user);
+    } catch (e) { this._reportError(e); return; }
+
+    document.getElementById('topbarName').textContent = user.fullName;
+    const okBox = document.getElementById('profileOk');
+    okBox.textContent = '✓ Profile saved.';
+    okBox.style.display = 'block';
+    setTimeout(() => { okBox.style.display = 'none'; }, 2500);
+  }
+
+  async changePassword() {
+    const cur = document.getElementById('curPw').value;
+    const nw = document.getElementById('newPw').value;
+    const conf = document.getElementById('confPw').value;
+    const errBox = document.getElementById('pwErr');
+    const okBox = document.getElementById('pwOk');
+    errBox.style.display = 'none';
+    okBox.style.display = 'none';
+
+    if (nw.length < 8) { errBox.textContent = 'New password must be at least 8 characters.'; errBox.style.display = 'block'; return; }
+    if (!/\d/.test(nw)) { errBox.textContent = 'New password must include at least one number.'; errBox.style.display = 'block'; return; }
+    if (nw !== conf) { errBox.textContent = 'New passwords do not match.'; errBox.style.display = 'block'; return; }
+
+    try {
+      await this.auth.changePassword(cur, nw);
+    } catch (e) {
+      if (e instanceof ValidationError) { errBox.textContent = e.message; errBox.style.display = 'block'; }
+      else { this._reportError(e); }
+      return;
+    }
+
+    ['curPw', 'newPw', 'confPw'].forEach(id => { document.getElementById(id).value = ''; });
+    okBox.textContent = '✓ Password updated.';
+    okBox.style.display = 'block';
+    setTimeout(() => { okBox.style.display = 'none'; }, 2500);
+  }
+
+  exportCsv() {
+    const logs = this._myLogs();
+    const games = this._myGames();
+    if (!logs.length) { this.toast('No logs to export yet.', 'error'); return; }
+
+    const rows = [['Date', 'Game', 'Duration (mins)', 'Notes']];
+    logs.forEach(l => {
+      const game = games.find(g => g.id === l.gameId);
+      rows.push([l.date, game ? game.name : '', String(l.durationMins), (l.notes || '').replace(/"/g, '""')]);
+    });
+    const csv = rows.map(r => r.map(cell => `"${cell}"`).join(',')).join('\n');
+
+    try {
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'grindtime-logs.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      this.toast('CSV downloaded.', 'success');
+    } catch (e) {
+      this.toast('Could not export right now.', 'error');
+    }
+  }
+
+  /* ── Modal / Toast ────────────────────────────────── */
+
+  showModal(title, msg, onConfirm) {
+    document.getElementById('modalTitle').textContent = title;
+    document.getElementById('modalMsg').textContent = msg;
+    document.getElementById('confirmModal').classList.add('visible');
+    this._modalCallback = onConfirm;
+  }
+
+  modalResolve(confirmed) {
+    document.getElementById('confirmModal').classList.remove('visible');
+    if (confirmed && typeof this._modalCallback === 'function') this._modalCallback();
+    this._modalCallback = null;
+  }
+
+  toast(message, type = 'info') {
+    const wrap = document.getElementById('toastWrap');
+    const el = document.createElement('div');
+    el.className = 'toast' + (type === 'error' ? ' error' : type === 'success' ? ' success' : '');
+    el.textContent = message;
+    wrap.appendChild(el);
+    setTimeout(() => { el.remove(); }, 3200);
+  }
+
+  /* ── Error reporting ──────────────────────────────── */
+
+  _reportError(e) {
+    console.error(e);
+    if (e instanceof StorageError) {
+      this.toast(e.message, 'error');
+    } else if (e instanceof PermissionError) {
+      this.toast(e.message, 'error');
+    } else if (e instanceof AppError) {
+      this.toast(e.message, 'error');
+    } else {
+      this.toast('Something went wrong. Please try again.', 'error');
+    }
+  }
+
+  /* ── Helpers ──────────────────────────────────────── */
+
+  _myGames() { return this.gameRepo.findAllForUser(this.auth.currentUser.id); }
+  _myLogs()  { return this.logRepo.findAllForUser(this.auth.currentUser.id); }
+  _todayStr() { return new Date().toISOString().split('T')[0]; }
+  _isEmail(str) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str); }
+
+  // The Minutes field only offers 0/15/30/45 (matching how sessions are
+  // logged), so an existing duration that isn't a clean multiple of 15
+  // (e.g. imported data) is snapped to the nearest option here rather
+  // than truncating to 0 and silently corrupting the edit.
+  _splitDuration(totalMins) {
+    let hours = Math.floor(totalMins / 60);
+    let remainder = totalMins % 60;
+    let mins = Math.round(remainder / 15) * 15;
+    if (mins === 60) { mins = 0; hours += 1; }
+    return { hours, mins };
+  }
+
+  _esc(str) {
+    return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  _gameBadge(game) {
+    if (!game) return '<span class="badge">—</span>';
+    const cls = COLOURS[game.colour] || 'badge-blue';
+    return `<span class="badge ${cls}">${this._esc(game.name)}</span>`;
+  }
+
+  _showFieldErr(inputId, errId, msg) {
+    const inp = document.getElementById(inputId);
+    const err = document.getElementById(errId);
+    if (inp) inp.classList.toggle('is-error', !!msg);
+    if (err) { err.textContent = msg || ''; err.style.display = msg ? 'block' : 'none'; }
+  }
+
+  _clearFieldErr(inputId, errId) { this._showFieldErr(inputId, errId, ''); }
+
+  /* ── Demo data ────────────────────────────────────── */
+
+  async _seedDemoData() {
+    // Idempotent: skip if the demo admin already exists.
+    if (this.userRepo.findByEmail('demo@grindtime.com')) return;
+
+    const games = [
+      { id: 'seed_g_mc', name: 'Minecraft', colour: 'green' },
+      { id: 'seed_g_ft', name: 'Fortnite', colour: 'purple' },
+      { id: 'seed_g_rb', name: 'Roblox', colour: 'amber' },
+    ];
+
+    const demoHash = await PasswordHasher.hash('Demo1234!');
+    const makeUser = (id, first, last, email, role) => new User({
+      id, firstName: first, lastName: last, email, role, passwordHash: demoHash,
+    });
+
+    const admin = makeUser('seed_u_admin', 'Sam', 'Parent', 'demo@grindtime.com', 'admin');
+    const standard = makeUser('seed_u_child', 'Alex', 'Kim', 'child@grindtime.com', 'standard');
+    this.userRepo.save(admin);
+    this.userRepo.save(standard);
+
+    [admin, standard].forEach(user => {
+      games.forEach(g => this.gameRepo.save(new Game({ id: g.id + '_' + user.id, userId: user.id, name: g.name, colour: g.colour })));
+    });
+
+    // 25 days of synthetic history per demo user, with Fortnite trending
+    // upward and Minecraft holding roughly steady, so Predictions has
+    // something meaningful to show immediately.
+    [admin, standard].forEach(user => {
+      const mcId = 'seed_g_mc_' + user.id;
+      const ftId = 'seed_g_ft_' + user.id;
+      const rbId = 'seed_g_rb_' + user.id;
+      const today = new Date();
+
+      for (let d = 24; d >= 0; d--) {
+        const date = new Date(today);
+        date.setDate(date.getDate() - d);
+        const dateStr = date.toISOString().split('T')[0];
+        const dayIdx = 24 - d;
+
+        // Seed durations are quantised to 15-minute steps, same as the
+        // Hours/Minutes inputs on the log form, so every seeded log can
+        // be opened and re-saved in the edit modal without surprises.
+        const round15 = mins => Math.max(15, Math.round(mins / 15) * 15);
+
+        if (dayIdx % 2 === 0) {
+          this.logRepo.save(new GameLog({
+            id: genId(), userId: user.id, gameId: mcId, date: dateStr,
+            durationMins: round15(40 + Math.sin(dayIdx) * 10), notes: 'Building session',
+          }));
+        }
+        if (dayIdx % 3 !== 0) {
+          this.logRepo.save(new GameLog({
+            id: genId(), userId: user.id, gameId: ftId, date: dateStr,
+            durationMins: round15(35 + dayIdx * 3.2 + (Math.random() * 12 - 6)), notes: 'Squad matches',
+          }));
+        }
+        if (dayIdx % 5 === 0) {
+          this.logRepo.save(new GameLog({
+            id: genId(), userId: user.id, gameId: rbId, date: dateStr,
+            durationMins: 30, notes: 'Played with friends',
+          }));
+        }
+      }
+    });
+  }
+}
+
+const app = new App();
+window.addEventListener('DOMContentLoaded', () => { app.init(); }); // init() is async; fire-and-forget is fine here since it only touches the DOM/localStorage
+</script>
+</body>
+</html>
